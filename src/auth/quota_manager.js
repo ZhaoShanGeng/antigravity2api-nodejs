@@ -1,18 +1,20 @@
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { log } from '../utils/logger.js';
 import memoryManager, { MemoryPressure } from '../utils/memoryManager.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { getDataDir } from '../utils/paths.js';
+import { QUOTA_CACHE_TTL, QUOTA_CLEANUP_INTERVAL } from '../constants/index.js';
 
 class QuotaManager {
-  constructor(filePath = path.join(__dirname, '..', '..', 'data', 'quotas.json')) {
+  /**
+   * @param {string} filePath - 额度数据文件路径
+   */
+  constructor(filePath = path.join(getDataDir(), 'quotas.json')) {
     this.filePath = filePath;
+    /** @type {Map<string, {lastUpdated: number, models: Object}>} */
     this.cache = new Map();
-    this.CACHE_TTL = 5 * 60 * 1000; // 5分钟缓存
-    this.CLEANUP_INTERVAL = 60 * 60 * 1000; // 1小时清理一次
+    this.CACHE_TTL = QUOTA_CACHE_TTL;
+    this.CLEANUP_INTERVAL = QUOTA_CLEANUP_INTERVAL;
     this.cleanupTimer = null;
     this.ensureFileExists();
     this.loadFromFile();

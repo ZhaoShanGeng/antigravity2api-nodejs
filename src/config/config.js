@@ -1,21 +1,87 @@
 import dotenv from 'dotenv';
 import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 import log from '../utils/logger.js';
+import { deepMerge } from '../utils/deepMerge.js';
+import { getConfigPaths } from '../utils/paths.js';
+import {
+  DEFAULT_SERVER_PORT,
+  DEFAULT_SERVER_HOST,
+  DEFAULT_HEARTBEAT_INTERVAL,
+  DEFAULT_TIMEOUT,
+  DEFAULT_RETRY_TIMES,
+  DEFAULT_MAX_REQUEST_SIZE,
+  DEFAULT_MAX_IMAGES,
+  MODEL_LIST_CACHE_TTL,
+  DEFAULT_GENERATION_PARAMS
+} from '../constants/index.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const envPath = path.join(__dirname, '../../.env');
-const configJsonPath = path.join(__dirname, '../../config.json');
+// 生成随机凭据的缓存
+let generatedCredentials = null;
 
-// 确保 .env 存在
-if (!fs.existsSync(envPath)) {
-  const examplePath = path.join(__dirname, '../../.env.example');
-  if (fs.existsSync(examplePath)) {
-    fs.copyFileSync(examplePath, envPath);
-    log.info('✓ 已从 .env.example 创建 .env 文件');
+/**
+ * 生成或获取管理员凭据
+ * 如果用户未配置，自动生成随机凭据
+ */
+function getAdminCredentials() {
+  const username = process.env.ADMIN_USERNAME;
+  const password = process.env.ADMIN_PASSWORD;
+  const jwtSecret = process.env.JWT_SECRET;
+  
+  // 如果全部配置了，直接返回
+  if (username && password && jwtSecret) {
+    return { username, password, jwtSecret };
   }
+  
+  // 生成随机凭据（只生成一次）
+  if (!generatedCredentials) {
+    generatedCredentials = {
+      username: username || crypto.randomBytes(8).toString('hex'),
+      password: password || crypto.randomBytes(16).toString('base64').replace(/[+/=]/g, ''),
+      jwtSecret: jwtSecret || crypto.randomBytes(32).toString('hex')
+    };
+    
+    // 显示生成的凭据
+    if (!username || !password) {
+      log.warn('═══════════════════════════════════════════════════════════');
+      log.warn('⚠️  未配置管理员账号密码，已自动生成随机凭据：');
+      log.warn(`    用户名: ${generatedCredentials.username}`);
+      log.warn(`    密码:   ${generatedCredentials.password}`);
+      log.warn('═══════════════════════════════════════════════════════════');
+      log.warn('⚠️  重启后凭据将重新生成！建议在 .env 文件中配置：');
+      log.warn('    ADMIN_USERNAME=你的用户名');
+      log.warn('    ADMIN_PASSWORD=你的密码');
+      log.warn('    JWT_SECRET=你的密钥');
+      log.warn('═══════════════════════════════════════════════════════════');
+    } else if (!jwtSecret) {
+      log.warn('⚠️ 未配置 JWT_SECRET，已生成随机密钥（重启后登录会话将失效）');
+    }
+  }
+  
+  return generatedCredentials;
+}
+
+const { envPath, configJsonPath } = getConfigPaths();
+
+// 默认系统提示词
+const DEFAULT_SYSTEM_INSTRUCTION = '你是聊天机器人，名字叫萌萌，如同名字这般，你的性格是软软糯糯萌萌哒的，专门为用户提供聊天和情绪价值，协助进行小说创作或者角色扮演';
+
+// 确保 .env 存在（如果缺失则创建带默认配置的文件）
+if (!fs.existsSync(envPath)) {
+  const defaultEnvContent = `# 敏感配置（只在 .env 中配置）
+# 如果不配置以下三项，系统会自动生成随机凭据并在启动时显示
+# API_KEY=your-api-key
+# ADMIN_USERNAME=your-username
+# ADMIN_PASSWORD=your-password
+# JWT_SECRET=your-jwt-secret
+
+# 可选配置
+# PROXY=http://127.0.0.1:7890
+SYSTEM_INSTRUCTION=${DEFAULT_SYSTEM_INSTRUCTION}
+# IMAGE_BASE_URL=http://your-domain.com
+`;
+  fs.writeFileSync(envPath, defaultEnvContent, 'utf8');
+  log.info('✓ 已创建 .env 文件，包含默认萌萌系统提示词');
 }
 
 // 加载 config.json
@@ -24,8 +90,8 @@ if (fs.existsSync(configJsonPath)) {
   jsonConfig = JSON.parse(fs.readFileSync(configJsonPath, 'utf8'));
 }
 
-// 加载 .env
-dotenv.config();
+// 加载 .env（指定路径）
+dotenv.config({ path: envPath });
 
 // 获取代理配置：优先使用 PROXY，其次使用系统代理环境变量
 export function getProxyConfig() {
@@ -49,53 +115,59 @@ export function getProxyConfig() {
   return systemProxy || null;
 }
 
-const config = {
-  server: {
-    port: jsonConfig.server?.port || 8045,
-    host: jsonConfig.server?.host || '0.0.0.0',
-    heartbeatInterval: jsonConfig.server?.heartbeatInterval || 15000,  // 心跳间隔(ms)，防止CF超时
-    memoryThreshold: jsonConfig.server?.memoryThreshold || 500  // 内存阈值(MB)，超过触发GC
-  },
-  cache: {
-    modelListTTL: jsonConfig.cache?.modelListTTL || 60 * 60 * 1000  // 模型列表缓存时间(ms)，默认60分钟
-  },
-  rotation: {
-    strategy: jsonConfig.rotation?.strategy || 'round_robin',  // 轮询策略: round_robin, quota_exhausted, request_count
-    requestCount: jsonConfig.rotation?.requestCount || 10  // request_count策略下每个token的请求次数
-  },
-  imageBaseUrl: process.env.IMAGE_BASE_URL || null,
-  maxImages: jsonConfig.other?.maxImages || 10,
-  api: {
-    url: jsonConfig.api?.url || 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent?alt=sse',
-    modelsUrl: jsonConfig.api?.modelsUrl || 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels',
-    noStreamUrl: jsonConfig.api?.noStreamUrl || 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:generateContent',
-    host: jsonConfig.api?.host || 'daily-cloudcode-pa.sandbox.googleapis.com',
-    userAgent: jsonConfig.api?.userAgent || 'antigravity/1.11.3 windows/amd64'
-  },
-  defaults: {
-    temperature: jsonConfig.defaults?.temperature || 1,
-    top_p: jsonConfig.defaults?.topP || 0.85,
-    top_k: jsonConfig.defaults?.topK || 50,
-    max_tokens: jsonConfig.defaults?.maxTokens || 32000,
-    thinking_budget: jsonConfig.defaults?.thinkingBudget ?? 1024
-  },
-  security: {
-    maxRequestSize: jsonConfig.server?.maxRequestSize || '50mb',
-    apiKey: process.env.API_KEY || null
-  },
-  admin: {
-    username: process.env.ADMIN_USERNAME || 'admin',
-    password: process.env.ADMIN_PASSWORD || 'admin123',
-    jwtSecret: process.env.JWT_SECRET || 'your-jwt-secret-key-change-this-in-production'
-  },
-  useNativeAxios: jsonConfig.other?.useNativeAxios !== false,
-  timeout: jsonConfig.other?.timeout || 300000,
-  // 默认 429 重试次数（统一配置，0 表示不重试，默认 3 次）
-  retryTimes: Number.isFinite(jsonConfig.other?.retryTimes) ? jsonConfig.other.retryTimes : 3,
-  proxy: getProxyConfig(),
-  systemInstruction: process.env.SYSTEM_INSTRUCTION || '',
-  skipProjectIdFetch: jsonConfig.other?.skipProjectIdFetch === true
-};
+/**
+ * 从 JSON 和环境变量构建配置对象
+ * @param {Object} jsonConfig - JSON 配置对象
+ * @returns {Object} 完整配置对象
+ */
+export function buildConfig(jsonConfig) {
+  return {
+    server: {
+      port: jsonConfig.server?.port || DEFAULT_SERVER_PORT,
+      host: jsonConfig.server?.host || DEFAULT_SERVER_HOST,
+      heartbeatInterval: jsonConfig.server?.heartbeatInterval || DEFAULT_HEARTBEAT_INTERVAL,
+      memoryThreshold: jsonConfig.server?.memoryThreshold || 100
+    },
+    cache: {
+      modelListTTL: jsonConfig.cache?.modelListTTL || MODEL_LIST_CACHE_TTL
+    },
+    rotation: {
+      strategy: jsonConfig.rotation?.strategy || 'round_robin',
+      requestCount: jsonConfig.rotation?.requestCount || 10
+    },
+    imageBaseUrl: process.env.IMAGE_BASE_URL || null,
+    maxImages: jsonConfig.other?.maxImages || DEFAULT_MAX_IMAGES,
+    api: {
+      url: jsonConfig.api?.url || 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent?alt=sse',
+      modelsUrl: jsonConfig.api?.modelsUrl || 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:fetchAvailableModels',
+      noStreamUrl: jsonConfig.api?.noStreamUrl || 'https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:generateContent',
+      host: jsonConfig.api?.host || 'daily-cloudcode-pa.sandbox.googleapis.com',
+      userAgent: jsonConfig.api?.userAgent || 'antigravity/1.11.3 windows/amd64'
+    },
+    defaults: {
+      temperature: jsonConfig.defaults?.temperature ?? DEFAULT_GENERATION_PARAMS.temperature,
+      top_p: jsonConfig.defaults?.topP ?? DEFAULT_GENERATION_PARAMS.top_p,
+      top_k: jsonConfig.defaults?.topK ?? DEFAULT_GENERATION_PARAMS.top_k,
+      max_tokens: jsonConfig.defaults?.maxTokens ?? DEFAULT_GENERATION_PARAMS.max_tokens,
+      thinking_budget: jsonConfig.defaults?.thinkingBudget ?? DEFAULT_GENERATION_PARAMS.thinking_budget
+    },
+    security: {
+      maxRequestSize: jsonConfig.server?.maxRequestSize || DEFAULT_MAX_REQUEST_SIZE,
+      apiKey: process.env.API_KEY || null
+    },
+    admin: getAdminCredentials(),
+    useNativeAxios: jsonConfig.other?.useNativeAxios !== false,
+    timeout: jsonConfig.other?.timeout || DEFAULT_TIMEOUT,
+    retryTimes: Number.isFinite(jsonConfig.other?.retryTimes) ? jsonConfig.other.retryTimes : DEFAULT_RETRY_TIMES,
+    proxy: getProxyConfig(),
+    systemInstruction: process.env.SYSTEM_INSTRUCTION || '',
+    skipProjectIdFetch: jsonConfig.other?.skipProjectIdFetch === true,
+    useContextSystemPrompt: jsonConfig.other?.useContextSystemPrompt === true,
+    passSignatureToClient: jsonConfig.other?.passSignatureToClient === true
+  };
+}
+
+const config = buildConfig(jsonConfig);
 
 log.info('✓ 配置加载成功');
 
@@ -109,5 +181,7 @@ export function getConfigJson() {
 }
 
 export function saveConfigJson(data) {
-  fs.writeFileSync(configJsonPath, JSON.stringify(data, null, 2), 'utf8');
+  const existing = getConfigJson();
+  const merged = deepMerge(existing, data);
+  fs.writeFileSync(configJsonPath, JSON.stringify(merged, null, 2), 'utf8');
 }

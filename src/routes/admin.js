@@ -2,43 +2,130 @@ import express from 'express';
 import { generateToken, authMiddleware } from '../auth/jwt.js';
 import tokenManager from '../auth/token_manager.js';
 import quotaManager from '../auth/quota_manager.js';
+import oauthManager from '../auth/oauth_manager.js';
 import config, { getConfigJson, saveConfigJson } from '../config/config.js';
 import logger from '../utils/logger.js';
-import { generateProjectId } from '../utils/idGenerator.js';
 import { parseEnvFile, updateEnvFile } from '../utils/envParser.js';
 import { reloadConfig } from '../utils/configReloader.js';
-import { OAUTH_CONFIG } from '../constants/oauth.js';
 import { deepMerge } from '../utils/deepMerge.js';
 import { getModelsWithQuotas } from '../api/client.js';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import { getEnvPath } from '../utils/paths.js';
 import dotenv from 'dotenv';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const envPath = path.join(__dirname, '../../.env');
+const envPath = getEnvPath();
 
 const router = express.Router();
 
+// 登录速率限制 - 防止暴力破解
+const loginAttempts = new Map(); // IP -> { count, lastAttempt, blockedUntil }
+const MAX_LOGIN_ATTEMPTS = 5;
+const BLOCK_DURATION = 5 * 60 * 1000; // 5分钟
+const ATTEMPT_WINDOW = 15 * 60 * 1000; // 15分钟窗口
+
+function getClientIP(req) {
+  return req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+         req.headers['x-real-ip'] ||
+         req.connection?.remoteAddress ||
+         req.ip ||
+         'unknown';
+}
+
+function checkLoginRateLimit(ip) {
+  const now = Date.now();
+  const attempt = loginAttempts.get(ip);
+  
+  if (!attempt) return { allowed: true };
+  
+  // 检查是否被封禁
+  if (attempt.blockedUntil && now < attempt.blockedUntil) {
+    const remainingSeconds = Math.ceil((attempt.blockedUntil - now) / 1000);
+    return {
+      allowed: false,
+      message: `登录尝试过多，请 ${remainingSeconds} 秒后重试`,
+      remainingSeconds
+    };
+  }
+  
+  // 清理过期的尝试记录
+  if (now - attempt.lastAttempt > ATTEMPT_WINDOW) {
+    loginAttempts.delete(ip);
+    return { allowed: true };
+  }
+  
+  return { allowed: true };
+}
+
+function recordLoginAttempt(ip, success) {
+  const now = Date.now();
+  
+  if (success) {
+    // 登录成功，清除记录
+    loginAttempts.delete(ip);
+    return;
+  }
+  
+  // 登录失败，记录尝试
+  const attempt = loginAttempts.get(ip) || { count: 0, lastAttempt: now };
+  attempt.count++;
+  attempt.lastAttempt = now;
+  
+  // 超过最大尝试次数，封禁
+  if (attempt.count >= MAX_LOGIN_ATTEMPTS) {
+    attempt.blockedUntil = now + BLOCK_DURATION;
+    logger.warn(`IP ${ip} 因登录失败次数过多被暂时封禁`);
+  }
+  
+  loginAttempts.set(ip, attempt);
+}
+
 // 登录接口
 router.post('/login', (req, res) => {
+  const clientIP = getClientIP(req);
+  
+  // 检查速率限制
+  const rateCheck = checkLoginRateLimit(clientIP);
+  if (!rateCheck.allowed) {
+    return res.status(429).json({
+      success: false,
+      message: rateCheck.message,
+      retryAfter: rateCheck.remainingSeconds
+    });
+  }
+  
   const { username, password } = req.body;
   
+  // 验证输入
+  if (!username || !password || typeof username !== 'string' || typeof password !== 'string') {
+    return res.status(400).json({ success: false, message: '用户名和密码必填' });
+  }
+  
+  // 限制输入长度防止 DoS
+  if (username.length > 100 || password.length > 100) {
+    return res.status(400).json({ success: false, message: '输入过长' });
+  }
+  
   if (username === config.admin.username && password === config.admin.password) {
+    recordLoginAttempt(clientIP, true);
     const token = generateToken({ username, role: 'admin' });
     res.json({ success: true, token });
   } else {
+    recordLoginAttempt(clientIP, false);
     res.status(401).json({ success: false, message: '用户名或密码错误' });
   }
 });
 
 // Token管理API - 需要JWT认证
-router.get('/tokens', authMiddleware, (req, res) => {
-  const tokens = tokenManager.getTokenList();
-  res.json({ success: true, data: tokens });
+router.get('/tokens', authMiddleware, async (req, res) => {
+  try {
+    const tokens = await tokenManager.getTokenList();
+    res.json({ success: true, data: tokens });
+  } catch (error) {
+    logger.error('获取Token列表失败:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
 });
 
-router.post('/tokens', authMiddleware, (req, res) => {
+router.post('/tokens', authMiddleware, async (req, res) => {
   const { access_token, refresh_token, expires_in, timestamp, enable, projectId, email } = req.body;
   if (!access_token || !refresh_token) {
     return res.status(400).json({ success: false, message: 'access_token和refresh_token必填' });
@@ -49,21 +136,36 @@ router.post('/tokens', authMiddleware, (req, res) => {
   if (projectId) tokenData.projectId = projectId;
   if (email) tokenData.email = email;
   
-  const result = tokenManager.addToken(tokenData);
-  res.json(result);
+  try {
+    const result = await tokenManager.addToken(tokenData);
+    res.json(result);
+  } catch (error) {
+    logger.error('添加Token失败:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
 });
 
-router.put('/tokens/:refreshToken', authMiddleware, (req, res) => {
+router.put('/tokens/:refreshToken', authMiddleware, async (req, res) => {
   const { refreshToken } = req.params;
   const updates = req.body;
-  const result = tokenManager.updateToken(refreshToken, updates);
-  res.json(result);
+  try {
+    const result = await tokenManager.updateToken(refreshToken, updates);
+    res.json(result);
+  } catch (error) {
+    logger.error('更新Token失败:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
 });
 
-router.delete('/tokens/:refreshToken', authMiddleware, (req, res) => {
+router.delete('/tokens/:refreshToken', authMiddleware, async (req, res) => {
   const { refreshToken } = req.params;
-  const result = tokenManager.deleteToken(refreshToken);
-  res.json(result);
+  try {
+    const result = await tokenManager.deleteToken(refreshToken);
+    res.json(result);
+  } catch (error) {
+    logger.error('删除Token失败:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
 });
 
 router.post('/tokens/reload', authMiddleware, async (req, res) => {
@@ -76,6 +178,27 @@ router.post('/tokens/reload', authMiddleware, async (req, res) => {
   }
 });
 
+// 刷新指定Token的access_token
+router.post('/tokens/:refreshToken/refresh', authMiddleware, async (req, res) => {
+  const { refreshToken } = req.params;
+  try {
+    logger.info('正在刷新token...');
+    const tokens = await tokenManager.getTokenList();
+    const tokenData = tokens.find(t => t.refresh_token === refreshToken);
+    
+    if (!tokenData) {
+      return res.status(404).json({ success: false, message: 'Token不存在' });
+    }
+    
+    // 调用 tokenManager 的刷新方法
+    const refreshedToken = await tokenManager.refreshToken(tokenData);
+    res.json({ success: true, message: 'Token刷新成功', data: { expires_in: refreshedToken.expires_in, timestamp: refreshedToken.timestamp } });
+  } catch (error) {
+    logger.error('刷新Token失败:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 router.post('/oauth/exchange', authMiddleware, async (req, res) => {
   const { code, port } = req.body;
   if (!code || !port) {
@@ -83,77 +206,13 @@ router.post('/oauth/exchange', authMiddleware, async (req, res) => {
   }
   
   try {
-    const postData = new URLSearchParams({
-      code,
-      client_id: OAUTH_CONFIG.CLIENT_ID,
-      client_secret: OAUTH_CONFIG.CLIENT_SECRET,
-      redirect_uri: `http://localhost:${port}/oauth-callback`,
-      grant_type: 'authorization_code'
-    });
-    
-    const response = await fetch(OAUTH_CONFIG.TOKEN_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: postData.toString()
-    });
-    
-    const tokenData = await response.json();
-    
-    if (!tokenData.access_token) {
-      return res.status(400).json({ success: false, message: 'Token交换失败' });
-    }
-    
-    const account = {
-      access_token: tokenData.access_token,
-      refresh_token: tokenData.refresh_token,
-      expires_in: tokenData.expires_in,
-      timestamp: Date.now(),
-      enable: true
-    };
-    
-    try {
-      const emailResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
-        headers: {
-          'Host': 'www.googleapis.com',
-          'User-Agent': 'Go-http-client/1.1',
-          'Authorization': `Bearer ${account.access_token}`,
-          'Accept-Encoding': 'gzip'
-        }
-      });
-      const userInfo = await emailResponse.json();
-      if (userInfo.email) {
-        account.email = userInfo.email;
-        logger.info('获取到用户邮箱: ' + userInfo.email);
-      }
-    } catch (err) {
-      logger.warn('获取用户邮箱失败:', err.message);
-    }
-    
-    // 始终尝试获取 projectId 进行资格校验
-    // 如果无资格，自动退回到无资格模式使用随机 projectId
-    try {
-      const projectId = await tokenManager.fetchProjectId(account);
-      if (projectId === undefined) {
-        // 无资格，自动退回到无资格模式
-        account.projectId = generateProjectId();
-        account.hasQuota = false;
-        logger.warn('该账号无资格使用，已自动退回无资格模式，使用随机projectId: ' + account.projectId);
-      } else {
-        account.projectId = projectId;
-        account.hasQuota = true;
-        logger.info('账号验证通过，projectId: ' + projectId);
-      }
-    } catch (error) {
-      // 获取失败时也退回到无资格模式
-      logger.warn('验证账号资格失败: ' + error.message + '，已自动退回无资格模式');
-      account.projectId = generateProjectId();
-      account.hasQuota = false;
-      logger.info('使用随机生成的projectId: ' + account.projectId);
-    }
-    
-    res.json({ success: true, data: account });
+    const account = await oauthManager.authenticate(code, port);
+    const message = account.hasQuota 
+      ? 'Token添加成功' 
+      : 'Token添加成功（该账号无资格，已自动使用随机ProjectId）';
+    res.json({ success: true, data: account, message, fallbackMode: !account.hasQuota });
   } catch (error) {
-    logger.error('Token交换失败:', error.message);
+    logger.error('认证失败:', error.message);
     res.status(500).json({ success: false, message: error.message });
   }
 });
@@ -175,15 +234,8 @@ router.put('/config', authMiddleware, (req, res) => {
   try {
     const { env: envUpdates, json: jsonUpdates } = req.body;
     
-    if (envUpdates) {
-      updateEnvFile(envPath, envUpdates);
-    }
-    
-    if (jsonUpdates) {
-      const currentConfig = getConfigJson();
-      const mergedConfig = deepMerge(currentConfig, jsonUpdates);
-      saveConfigJson(mergedConfig);
-    }
+    if (envUpdates) updateEnvFile(envPath, envUpdates);
+    if (jsonUpdates) saveConfigJson(deepMerge(getConfigJson(), jsonUpdates));
     
     dotenv.config({ override: true });
     reloadConfig();
@@ -224,12 +276,15 @@ router.put('/rotation', authMiddleware, (req, res) => {
     // 更新内存中的配置
     tokenManager.updateRotationConfig(strategy, requestCount);
     
-    // 同时保存到config.json
+    // 保存到config.json
     const currentConfig = getConfigJson();
     if (!currentConfig.rotation) currentConfig.rotation = {};
     if (strategy) currentConfig.rotation.strategy = strategy;
     if (requestCount) currentConfig.rotation.requestCount = requestCount;
     saveConfigJson(currentConfig);
+    
+    // 重载配置到内存
+    reloadConfig();
     
     logger.info(`轮询策略已更新: ${strategy || '未变'}, 请求次数: ${requestCount || '未变'}`);
     res.json({ success: true, message: '轮询策略已更新', data: tokenManager.getRotationConfig() });
@@ -244,7 +299,7 @@ router.get('/tokens/:refreshToken/quotas', authMiddleware, async (req, res) => {
   try {
     const { refreshToken } = req.params;
     const forceRefresh = req.query.refresh === 'true';
-    const tokens = tokenManager.getTokenList();
+    const tokens = await tokenManager.getTokenList();
     let tokenData = tokens.find(t => t.refresh_token === refreshToken);
     
     if (!tokenData) {
