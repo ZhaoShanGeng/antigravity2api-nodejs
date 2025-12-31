@@ -1,10 +1,10 @@
 {
   "rewrites": [
-    { "source": "/v1/(.*)", "destination": "/api/index" },
-    { "source": "/v1beta/(.*)", "destination": "/api/index" },
-    { "source": "/admin/(.*)", "destination": "/api/index" },
-    { "source": "/sdapi/(.*)", "destination": "/api/index" },
-    { "source": "/health", "destination": "/api/index" },
-    { "source": "/v1/memory", "destination": "/api/index" }
+    { "source": "/v1/(.*)", "destination": "/api/index/v1/$1" },
+    { "source": "/v1beta/(.*)", "destination": "/api/index/v1beta/$1" },
+    { "source": "/admin/(.*)", "destination": "/api/index/admin/$1" },
+    { "source": "/sdapi/(.*)", "destination": "/api/index/sdapi/$1" },
+    { "source": "/health", "destination": "/api/index/health" },
+    { "source": "/v1/memory", "destination": "/api/index/v1/memory" }
   ]
 }

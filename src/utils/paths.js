@@ -18,6 +18,12 @@ const __dirname = path.dirname(__filename);
 export const isPkg = typeof process.pkg !== 'undefined';
 
 /**
+ * 检测是否在 Vercel 环境中运行
+ * @type {boolean}
+ */
+export const isVercel = Boolean(process.env.VERCEL);
+
+/**
  * 获取项目根目录
  * @returns {string} 项目根目录路径
  */
@@ -31,9 +37,15 @@ export function getProjectRoot() {
 /**
  * 获取数据目录路径
  * pkg 环境下使用可执行文件所在目录或当前工作目录
+ * Vercel 环境下返回 /tmp 目录
  * @returns {string} 数据目录路径
  */
 export function getDataDir() {
+  // Vercel 环境下使用 /tmp 目录（唯一可写目录）
+  if (isVercel) {
+    return '/tmp';
+  }
+  
   if (isPkg) {
     // pkg 环境：优先使用可执行文件旁边的 data 目录
     const exeDir = path.dirname(process.execPath);
@@ -71,6 +83,11 @@ export function getDataDir() {
  * @returns {string} public 目录路径
  */
 export function getPublicDir() {
+  // Vercel 环境下使用项目根目录的 public
+  if (isVercel) {
+    return path.join(__dirname, '../../public');
+  }
+  
   if (isPkg) {
     // pkg 环境：优先使用可执行文件旁边的 public 目录
     const exeDir = path.dirname(process.execPath);
@@ -92,9 +109,15 @@ export function getPublicDir() {
 
 /**
  * 获取图片存储目录
+ * Vercel 环境下返回 /tmp/images（不会实际创建）
  * @returns {string} 图片目录路径
  */
 export function getImageDir() {
+  // Vercel 环境下使用 /tmp 目录（不创建，因为图片会返回 data URL）
+  if (isVercel) {
+    return '/tmp/images';
+  }
+  
   if (isPkg) {
     // pkg 环境：优先使用可执行文件旁边的 public/images 目录
     const exeDir = path.dirname(process.execPath);
@@ -155,6 +178,15 @@ export function getEnvPath() {
  * @returns {{envPath: string, configJsonPath: string, examplePath: string}} 配置文件路径
  */
 export function getConfigPaths() {
+  // Vercel 环境下返回项目目录路径（只读）
+  if (isVercel) {
+    return {
+      envPath: path.join(__dirname, '../../.env'),
+      configJsonPath: path.join(__dirname, '../../config.json'),
+      examplePath: path.join(__dirname, '../../.env.example')
+    };
+  }
+  
   if (isPkg) {
     // pkg 环境：优先使用可执行文件旁边的配置文件
     const exeDir = path.dirname(process.execPath);
