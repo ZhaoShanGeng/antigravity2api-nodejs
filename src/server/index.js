@@ -25,13 +25,18 @@ import claudeRouter from '../routes/claude.js';
 const publicDir = getPublicDir();
 const isVercel = Boolean(process.env.VERCEL);
 
-logger.info(`静态文件目录: ${getRelativePath(publicDir)}`);
+if (!isVercel) {
+  logger.info(`静态文件目录: ${getRelativePath(publicDir)}`);
+}
 
 const app = express();
 
 // ==================== 内存管理 ====================
-memoryManager.setThreshold(config.server.memoryThreshold);
-memoryManager.start(MEMORY_CHECK_INTERVAL);
+// Vercel 环境下跳过内存管理器（无状态函数）
+if (!isVercel) {
+  memoryManager.setThreshold(config.server.memoryThreshold);
+  memoryManager.start(MEMORY_CHECK_INTERVAL);
+}
 
 // ==================== 基础中间件 ====================
 app.use(cors());
@@ -43,9 +48,6 @@ app.use(express.static(publicDir));
 
 // 管理路由
 app.use('/admin', adminRouter);
-
-// 使用统一错误处理中间件
-app.use(errorHandler);
 
 // ==================== 请求日志中间件 ====================
 app.use((req, res, next) => {
@@ -126,6 +128,9 @@ app.get('/v1/memory', (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
+
+// 使用统一错误处理中间件（放在所有路由之后）
+app.use(errorHandler);
 
 // ==================== 服务器启动 ====================
 let server = null;
