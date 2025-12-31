@@ -3,10 +3,12 @@ import path from 'path';
 import { getDataDir } from '../utils/paths.js';
 import { FILE_CACHE_TTL } from '../constants/index.js';
 import { log } from '../utils/logger.js';
+import { getEdgeConfig, isVercelEnvironment } from '../utils/vercelStore.js';
 
 /**
  * 负责 token 文件的读写与简单缓存
  * 不关心业务字段，只处理 JSON 数组的加载和保存
+ * 在 Vercel 环境下使用 Edge Config 存储
  */
 class TokenStore {
   constructor(filePath = path.join(getDataDir(), 'accounts.json')) {
@@ -14,9 +16,13 @@ class TokenStore {
     this._cache = null;
     this._cacheTime = 0;
     this._cacheTTL = FILE_CACHE_TTL;
+    this._isVercel = isVercelEnvironment();
   }
 
   async _ensureFileExists() {
+    // Vercel 环境下跳过文件系统操作
+    if (this._isVercel) return;
+    
     const dir = path.dirname(this.filePath);
     try {
       await fs.mkdir(dir, { recursive: true });
@@ -48,6 +54,24 @@ class TokenStore {
       return this._cache;
     }
 
+    // Vercel 环境下从 Edge Config 读取
+    if (this._isVercel) {
+      try {
+        const accounts = await getEdgeConfig('accounts');
+        if (Array.isArray(accounts)) {
+          this._cache = accounts;
+        } else {
+          log.warn('Edge Config accounts 格式异常，使用空数组');
+          this._cache = [];
+        }
+      } catch (error) {
+        log.error('读取 Edge Config 失败:', error.message);
+        this._cache = [];
+      }
+      this._cacheTime = Date.now();
+      return this._cache;
+    }
+
     await this._ensureFileExists();
     try {
       const data = await fs.readFile(this.filePath, 'utf8');
@@ -71,8 +95,18 @@ class TokenStore {
    * @param {Array<object>} tokens
    */
   async writeAll(tokens) {
-    await this._ensureFileExists();
     const normalized = Array.isArray(tokens) ? tokens : [];
+    
+    // Vercel 环境下只更新内存缓存，不写入文件
+    // Edge Config 是只读的，需要通过 Vercel API 或控制台更新
+    if (this._isVercel) {
+      log.warn('Vercel 环境下无法写入 Edge Config，仅更新内存缓存');
+      this._cache = normalized;
+      this._cacheTime = Date.now();
+      return;
+    }
+    
+    await this._ensureFileExists();
     try {
       await fs.writeFile(this.filePath, JSON.stringify(normalized, null, 2), 'utf8');
       this._cache = normalized;

@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import log from '../utils/logger.js';
 import { deepMerge } from '../utils/deepMerge.js';
 import { getConfigPaths } from '../utils/paths.js';
+import { getEdgeConfig, isVercelEnvironment } from '../utils/vercelStore.js';
 import {
   DEFAULT_SERVER_PORT,
   DEFAULT_SERVER_HOST,
@@ -16,6 +17,8 @@ import {
   DEFAULT_GENERATION_PARAMS,
   DEFAULT_REQUEST_COUNT_PER_TOKEN
 } from '../constants/index.js';
+
+const isVercel = isVercelEnvironment();
 
 // 生成随机凭据的缓存
 let generatedCredentials = null;
@@ -67,9 +70,11 @@ const { envPath, configJsonPath } = getConfigPaths();
 // 默认系统提示词
 const DEFAULT_SYSTEM_INSTRUCTION = '你是聊天机器人，名字叫萌萌，如同名字这般，你的性格是软软糯糯萌萌哒的，专门为用户提供聊天和情绪价值，协助进行小说创作或者角色扮演';
 
-// 确保 .env 存在（如果缺失则创建带默认配置的文件）
-if (!fs.existsSync(envPath)) {
-  const defaultEnvContent = `# 敏感配置（只在 .env 中配置）
+// Vercel 环境下跳过文件系统操作
+if (!isVercel) {
+  // 确保 .env 存在（如果缺失则创建带默认配置的文件）
+  if (!fs.existsSync(envPath)) {
+    const defaultEnvContent = `# 敏感配置（只在 .env 中配置）
 # 如果不配置以下三项，系统会自动生成随机凭据并在启动时显示
 # API_KEY=your-api-key
 # ADMIN_USERNAME=your-username
@@ -81,18 +86,19 @@ if (!fs.existsSync(envPath)) {
 SYSTEM_INSTRUCTION=${DEFAULT_SYSTEM_INSTRUCTION}
 # IMAGE_BASE_URL=http://your-domain.com
 `;
-  fs.writeFileSync(envPath, defaultEnvContent, 'utf8');
-  log.info('✓ 已创建 .env 文件，包含默认萌萌系统提示词');
+    fs.writeFileSync(envPath, defaultEnvContent, 'utf8');
+    log.info('✓ 已创建 .env 文件，包含默认萌萌系统提示词');
+  }
+  
+  // 加载 .env（指定路径）
+  dotenv.config({ path: envPath });
 }
 
 // 加载 config.json
 let jsonConfig = {};
-if (fs.existsSync(configJsonPath)) {
+if (!isVercel && fs.existsSync(configJsonPath)) {
   jsonConfig = JSON.parse(fs.readFileSync(configJsonPath, 'utf8'));
 }
-
-// 加载 .env（指定路径）
-dotenv.config({ path: envPath });
 
 // 获取代理配置：优先使用 PROXY，其次使用系统代理环境变量
 export function getProxyConfig() {
@@ -177,6 +183,10 @@ log.info('✓ 配置加载成功');
 export default config;
 
 export function getConfigJson() {
+  // Vercel 环境下返回空对象，配置通过环境变量获取
+  if (isVercel) {
+    return {};
+  }
   if (fs.existsSync(configJsonPath)) {
     return JSON.parse(fs.readFileSync(configJsonPath, 'utf8'));
   }
@@ -184,6 +194,11 @@ export function getConfigJson() {
 }
 
 export function saveConfigJson(data) {
+  // Vercel 环境下无法写入文件
+  if (isVercel) {
+    log.warn('Vercel 环境下无法保存配置到文件');
+    return;
+  }
   const existing = getConfigJson();
   const merged = deepMerge(existing, data);
   fs.writeFileSync(configJsonPath, JSON.stringify(merged, null, 2), 'utf8');
