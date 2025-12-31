@@ -6,9 +6,10 @@ import { getImageDir, isPkg } from './paths.js';
 import { MIME_TO_EXT } from '../constants/index.js';
 
 const IMAGE_DIR = getImageDir();
+const isVercel = Boolean(process.env.VERCEL);
 
-// 确保图片目录存在（开发环境）
-if (!isPkg && !fs.existsSync(IMAGE_DIR)) {
+// 确保图片目录存在（开发环境，非 Vercel）
+if (!isPkg && !isVercel && !fs.existsSync(IMAGE_DIR)) {
   fs.mkdirSync(IMAGE_DIR, { recursive: true });
 }
 
@@ -17,6 +18,9 @@ if (!isPkg && !fs.existsSync(IMAGE_DIR)) {
  * @param {number} maxCount - 最大保留图片数量
  */
 function cleanOldImages(maxCount = 10) {
+  // Vercel 环境下跳过清理
+  if (isVercel) return;
+  
   const files = fs.readdirSync(IMAGE_DIR)
     .filter(f => /\.(jpg|jpeg|png|gif|webp)$/i.test(f))
     .map(f => ({
@@ -33,12 +37,19 @@ function cleanOldImages(maxCount = 10) {
 
 /**
  * 保存 base64 图片到本地并返回访问 URL
+ * Vercel 环境下返回 data URL（无法写入文件系统）
  * @param {string} base64Data - base64 编码的图片数据
  * @param {string} mimeType - 图片 MIME 类型
- * @returns {string} 图片访问 URL
+ * @returns {string} 图片访问 URL 或 data URL
  */
 export function saveBase64Image(base64Data, mimeType) {
   const ext = MIME_TO_EXT[mimeType] || 'jpg';
+  
+  // Vercel 环境下返回 data URL
+  if (isVercel) {
+    return `data:${mimeType};base64,${base64Data}`;
+  }
+  
   const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 9)}.${ext}`;
   const filepath = path.join(IMAGE_DIR, filename);
   
