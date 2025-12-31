@@ -23,6 +23,7 @@ import geminiRouter from '../routes/gemini.js';
 import claudeRouter from '../routes/claude.js';
 
 const publicDir = getPublicDir();
+const isVercel = Boolean(process.env.VERCEL);
 
 logger.info(`静态文件目录: ${getRelativePath(publicDir)}`);
 
@@ -127,22 +128,34 @@ app.get('/health', (req, res) => {
 });
 
 // ==================== 服务器启动 ====================
-const server = app.listen(config.server.port, config.server.host, () => {
-  logger.info(`服务器已启动: ${config.server.host}:${config.server.port}`);
-});
+let server = null;
 
-server.on('error', (error) => {
-  if (error.code === 'EADDRINUSE') {
-    logger.error(`端口 ${config.server.port} 已被占用`);
-    process.exit(1);
-  } else if (error.code === 'EACCES') {
-    logger.error(`端口 ${config.server.port} 无权限访问`);
-    process.exit(1);
-  } else {
-    logger.error('服务器启动失败:', error.message);
-    process.exit(1);
-  }
-});
+export function startServer() {
+  if (server || isVercel) return server;
+  server = app.listen(config.server.port, config.server.host, () => {
+    logger.info(`服务器已启动: ${config.server.host}:${config.server.port}`);
+  });
+  
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      logger.error(`端口 ${config.server.port} 已被占用`);
+      process.exit(1);
+    } else if (error.code === 'EACCES') {
+      logger.error(`端口 ${config.server.port} 无权限访问`);
+      process.exit(1);
+    } else {
+      logger.error('服务器启动失败:', error.message);
+      process.exit(1);
+    }
+  });
+  return server;
+}
+
+if (!isVercel) {
+  startServer();
+} else {
+  logger.info('检测到 Vercel 环境，使用无监听模式启动 Express 应用');
+}
 
 // ==================== 优雅关闭 ====================
 const shutdown = () => {
@@ -160,10 +173,14 @@ const shutdown = () => {
   clearChunkPool();
   logger.info('已清理对象池');
   
-  server.close(() => {
-    logger.info('服务器已关闭');
+  if (server) {
+    server.close(() => {
+      logger.info('服务器已关闭');
+      process.exit(0);
+    });
+  } else {
     process.exit(0);
-  });
+  }
   
   // 5秒超时强制退出
   setTimeout(() => {
@@ -184,3 +201,6 @@ process.on('uncaughtException', (error) => {
 process.on('unhandledRejection', (reason, promise) => {
   logger.error('未处理的 Promise 拒绝:', reason);
 });
+
+export { app };
+export default app;

@@ -29,6 +29,13 @@ const quotaCache = {
     }
 };
 
+function normalizeRemaining(quota) {
+    const value = Number(quota?.remaining);
+    if (!Number.isFinite(value) || value < 0) return 0;
+    if (value > 1) return 1;
+    return value;
+}
+
 async function loadTokenQuotaSummary(refreshToken) {
     const cardId = refreshToken.substring(0, 8);
     const summaryEl = document.getElementById(`quota-summary-${cardId}`);
@@ -62,7 +69,7 @@ async function loadTokenQuotaSummary(refreshToken) {
 }
 
 function renderQuotaSummary(summaryEl, quotaData) {
-    const models = quotaData.models;
+    const models = quotaData.models || {};
     const modelEntries = Object.entries(models);
     
     if (modelEntries.length === 0) {
@@ -71,15 +78,16 @@ function renderQuotaSummary(summaryEl, quotaData) {
     }
     
     let minModel = modelEntries[0][0];
-    let minQuota = modelEntries[0][1];
+    let minRemaining = 1;
     modelEntries.forEach(([modelId, quota]) => {
-        if (quota.remaining < minQuota.remaining) {
-            minQuota = quota;
+        const remaining = normalizeRemaining(quota);
+        if (remaining < minRemaining) {
+            minRemaining = remaining;
             minModel = modelId;
         }
     });
     
-    const percentage = minQuota.remaining * 100;
+    const percentage = minRemaining * 100;
     const percentageText = `${percentage.toFixed(2)}%`;
     const shortName = escapeHtml(minModel.replace('models/', '').replace('publishers/google/', '').split('/').pop());
     const safeMinModel = escapeHtml(minModel);
@@ -134,7 +142,7 @@ async function loadQuotaDetail(cardId, refreshToken) {
         const data = await response.json();
         
         if (data.success && data.data && data.data.models) {
-            const models = data.data.models;
+            const models = data.data.models || {};
             const modelEntries = Object.entries(models);
             
             if (modelEntries.length === 0) {
@@ -156,12 +164,12 @@ async function loadQuotaDetail(cardId, refreshToken) {
                 if (items.length === 0) return '';
                 let groupHtml = '';
                 items.forEach(({ modelId, quota }) => {
-                    const percentage = quota.remaining * 100;
+                    const percentage = normalizeRemaining(quota) * 100;
                     const percentageText = `${percentage.toFixed(2)}%`;
                     const barColor = percentage > 50 ? '#10b981' : percentage > 20 ? '#f59e0b' : '#ef4444';
                     const shortName = escapeHtml(modelId.replace('models/', '').replace('publishers/google/', '').split('/').pop());
                     const safeModelId = escapeHtml(modelId);
-                    const safeResetTime = escapeHtml(quota.resetTime);
+                    const safeResetTime = escapeHtml(quota.resetTime || 'N/A');
                     groupHtml += `
                         <div class="quota-detail-row" title="${safeModelId} - 重置: ${safeResetTime}">
                             <span class="quota-detail-icon">${icon}</span>
@@ -349,7 +357,7 @@ async function refreshQuotaData() {
 }
 
 function renderQuotaModal(quotaContent, quotaData) {
-    const models = quotaData.models;
+    const models = quotaData.models || {};
     
     const updateTimeEl = document.getElementById('quotaUpdateTime');
     if (updateTimeEl && quotaData.lastUpdated) {
@@ -378,12 +386,12 @@ function renderQuotaModal(quotaContent, quotaData) {
         if (items.length === 0) return '';
         let groupHtml = `<div class="quota-group-title">${escapeHtml(title)}</div><div class="quota-grid">`;
         items.forEach(({ modelId, quota }) => {
-            const percentage = quota.remaining * 100;
+            const percentage = normalizeRemaining(quota) * 100;
             const percentageText = `${percentage.toFixed(2)}%`;
             const barColor = percentage > 50 ? '#10b981' : percentage > 20 ? '#f59e0b' : '#ef4444';
             const shortName = escapeHtml(modelId.replace('models/', '').replace('publishers/google/', ''));
             const safeModelId = escapeHtml(modelId);
-            const safeResetTime = escapeHtml(quota.resetTime);
+            const safeResetTime = escapeHtml(quota.resetTime || 'N/A');
             groupHtml += `
                 <div class="quota-item">
                     <div class="quota-model-name" title="${safeModelId}">${shortName}</div>

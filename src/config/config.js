@@ -13,7 +13,8 @@ import {
   DEFAULT_MAX_REQUEST_SIZE,
   DEFAULT_MAX_IMAGES,
   MODEL_LIST_CACHE_TTL,
-  DEFAULT_GENERATION_PARAMS
+  DEFAULT_GENERATION_PARAMS,
+  DEFAULT_REQUEST_COUNT_PER_TOKEN
 } from '../constants/index.js';
 
 // 生成随机凭据的缓存
@@ -133,7 +134,9 @@ export function buildConfig(jsonConfig) {
     },
     rotation: {
       strategy: jsonConfig.rotation?.strategy || 'round_robin',
-      requestCount: jsonConfig.rotation?.requestCount || 10
+      requestCount: Number.isFinite(jsonConfig.rotation?.requestCount) && jsonConfig.rotation.requestCount > 0
+        ? jsonConfig.rotation.requestCount
+        : DEFAULT_REQUEST_COUNT_PER_TOKEN
     },
     imageBaseUrl: process.env.IMAGE_BASE_URL || null,
     maxImages: jsonConfig.other?.maxImages || DEFAULT_MAX_IMAGES,

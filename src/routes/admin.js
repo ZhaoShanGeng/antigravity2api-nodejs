@@ -330,11 +330,11 @@ router.get('/tokens/:refreshToken/quotas', authMiddleware, async (req, res) => {
     
     // 转换时间为北京时间
     const modelsWithBeijingTime = {};
-    Object.entries(quotaData.models).forEach(([modelId, quota]) => {
+    Object.entries(quotaData.models || {}).forEach(([modelId, quota]) => {
       modelsWithBeijingTime[modelId] = {
-        remaining: quota.r,
-        resetTime: quotaManager.convertToBeijingTime(quota.t),
-        resetTimeRaw: quota.t
+        remaining: Number.isFinite(quota?.r) ? quota.r : 0,
+        resetTime: quotaManager.convertToBeijingTime(quota?.t),
+        resetTimeRaw: quota?.t || null
       };
     });
     

@@ -6,7 +6,8 @@ import { OAUTH_CONFIG } from '../constants/oauth.js';
 import { buildAxiosRequestConfig } from '../utils/httpClient.js';
 import {
   DEFAULT_REQUEST_COUNT_PER_TOKEN,
-  TOKEN_REFRESH_BUFFER
+  TOKEN_REFRESH_BUFFER,
+  QUOTA_CACHE_TTL
 } from '../constants/index.js';
 import TokenStore from './token_store.js';
 import { TokenError } from '../utils/errors.js';
@@ -40,6 +41,8 @@ class TokenManager {
     this.requestCountPerToken = DEFAULT_REQUEST_COUNT_PER_TOKEN;
     /** @type {Map<string, number>} */
     this.tokenRequestCounts = new Map();
+    /** @type {Map<string, {lastUpdated: number, quotas: Object}>} */
+    this.modelQuotaCache = new Map();
     
     // 针对额度耗尽策略的可用 token 索引缓存（优化大规模账号场景）
     /** @type {number[]} */
@@ -166,7 +169,7 @@ class TokenManager {
       const jsonConfig = getConfigJson();
       if (jsonConfig.rotation) {
         this.rotationStrategy = jsonConfig.rotation.strategy || RotationStrategy.ROUND_ROBIN;
-        this.requestCountPerToken = jsonConfig.rotation.requestCount || 10;
+        this.requestCountPerToken = jsonConfig.rotation.requestCount || DEFAULT_REQUEST_COUNT_PER_TOKEN;
       }
     } catch (error) {
       log.warn('加载轮询配置失败，使用默认值:', error.message);
@@ -310,12 +313,46 @@ class TokenManager {
     this.tokenRequestCounts.set(tokenKey, 0);
   }
 
+  // 根据模型剩余额度决定是否跳过该 token（仅当前请求）
+  async _shouldSkipForModel(token, modelName) {
+    if (!modelName) return false;
+    const quotas = await this._getModelQuotas(token);
+    if (!quotas) return false;
+    const remaining = this._getModelRemaining(quotas, modelName);
+    return remaining !== null && remaining <= 0;
+  }
+
+  _getModelRemaining(quotas, modelName) {
+    if (!quotas || !modelName) return null;
+    if (quotas[modelName]) return Number(quotas[modelName].r ?? quotas[modelName].remaining ?? 0);
+    // 兼容返回的完整模型名（可能带 publishers/google/ 前缀）
+    const hit = Object.entries(quotas).find(([key]) => key.endsWith(modelName));
+    if (hit) {
+      const q = hit[1] || {};
+      return Number(q.r ?? q.remaining ?? 0);
+    }
+    return null;
+  }
+
   // 判断是否应该切换到下一个token
   shouldRotate(token) {
+    // 无额度的账号需要跳过
+    if (token.hasQuota === false) {
+      return true;
+    }
+
+    const tokenKey = token.refresh_token;
+    const threshold = Math.max(1, this.requestCountPerToken || 1);
+
     switch (this.rotationStrategy) {
       case RotationStrategy.ROUND_ROBIN:
-        // 均衡负载：每次请求后都切换
-        return true;
+        // 均衡负载：支持自定义请求次数，默认每次请求后切换
+        if (threshold <= 1) return true;
+        if (this.incrementRequestCount(tokenKey) >= threshold) {
+          this.resetRequestCount(tokenKey);
+          return true;
+        }
+        return false;
         
       case RotationStrategy.QUOTA_EXHAUSTED:
         // 额度耗尽才切换：检查token的hasQuota标记
@@ -324,9 +361,7 @@ class TokenManager {
         
       case RotationStrategy.REQUEST_COUNT:
         // 自定义次数后切换
-        const tokenKey = token.refresh_token;
-        const count = this.incrementRequestCount(tokenKey);
-        if (count >= this.requestCountPerToken) {
+        if (this.incrementRequestCount(tokenKey) >= threshold) {
           this.resetRequestCount(tokenKey);
           return true;
         }
@@ -492,12 +527,22 @@ class TokenManager {
    * @private
    */
   async _getTokenForDefaultStrategy() {
+    // 如果所有账号都被标记为无额度，自动重置状态避免死循环
+    const hasQuotaToken = this.tokens.some(t => t.hasQuota !== false);
+    if (!hasQuotaToken) {
+      this._resetAllQuotas();
+    }
+
     const totalTokens = this.tokens.length;
     const startIndex = this.currentIndex;
 
     for (let i = 0; i < totalTokens; i++) {
       const index = (startIndex + i) % totalTokens;
       const token = this.tokens[index];
+
+      if (token.hasQuota === false) {
+        continue;
+      }
 
       try {
         const result = await this._prepareToken(token);
@@ -636,6 +681,84 @@ class TokenManager {
     }
   }
 
+  // 判断错误是否是额度相关错误，决定是否切换账号
+  _isQuotaError(error) {
+    if (!error) return false;
+    if (error.isQuotaExhausted) return true;
+
+    const status = Number(error.status || error.statusCode || error.response?.status);
+    if (status === 429) return true;
+
+    const rawText = this._extractErrorText(error);
+    if (!rawText) return false;
+    return /quota|exceed|exhaust|insufficient/i.test(rawText);
+  }
+
+  _extractErrorText(error) {
+    if (typeof error.rawBody === 'string') return error.rawBody;
+    if (error.rawBody && typeof error.rawBody === 'object') {
+      try {
+        return JSON.stringify(error.rawBody);
+      } catch (e) {
+        return '';
+      }
+    }
+    if (typeof error.response?.data === 'string') return error.response.data;
+    if (error.response?.data) {
+      try {
+        return JSON.stringify(error.response.data);
+      } catch (e) {
+        return '';
+      }
+    }
+    return error.message || '';
+  }
+
+  /**
+   * 包装执行函数，遇到额度错误时自动切换下一个账号
+   * @param {(token: Object) => Promise<any>} executor
+   * @returns {Promise<any>}
+   */
+  /**
+   * 包装执行函数，遇到额度错误时自动切换下一个账号
+   * @param {(token: Object) => Promise<any>} executor
+   * @param {string|null} modelName - 请求使用的模型名称，用于基于模型额度跳过账号
+   * @returns {Promise<any>}
+   */
+  async executeWithToken(executor, modelName = null) {
+    await this._ensureInitialized();
+    if (this.tokens.length === 0) {
+      throw new Error('没有可用的token，请运行 npm run login 获取token');
+    }
+
+    const maxAttempts = this.tokens.length;
+    let attempts = 0;
+    let lastError = null;
+
+    while (attempts < maxAttempts) {
+      const token = await this.getToken();
+      if (!token) break;
+
+      try {
+        if (await this._shouldSkipForModel(token, modelName)) {
+          attempts++;
+          continue;
+        }
+        return await executor(token);
+      } catch (error) {
+        if (this._isQuotaError(error)) {
+          this.markQuotaExhausted(token);
+          attempts++;
+          lastError = error;
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    throw lastError || new Error('所有账号额度已用尽，请添加新账号');
+  }
+
   // 获取当前轮询配置
   getRotationConfig() {
     return {
@@ -644,6 +767,49 @@ class TokenManager {
       currentIndex: this.currentIndex,
       tokenCounts: Object.fromEntries(this.tokenRequestCounts)
     };
+  }
+
+  async _getModelQuotas(token) {
+    const cache = this.modelQuotaCache.get(token.refresh_token);
+    const now = Date.now();
+    if (cache && (now - cache.lastUpdated) < QUOTA_CACHE_TTL) {
+      return cache.quotas;
+    }
+    const quotas = await this.fetchModelQuotas(token).catch(() => null);
+    if (quotas) {
+      this.modelQuotaCache.set(token.refresh_token, { lastUpdated: now, quotas });
+    }
+    return quotas;
+  }
+
+  async fetchModelQuotas(token) {
+    const body = {};
+    const headers = {
+      'Host': config.api.host,
+      'User-Agent': config.api.userAgent,
+      'Authorization': `Bearer ${token.access_token}`,
+      'Content-Type': 'application/json',
+      'Accept-Encoding': 'gzip'
+    };
+    const response = await axios(buildAxiosRequestConfig({
+      method: 'POST',
+      url: config.api.modelsUrl,
+      headers,
+      data: JSON.stringify(body),
+      timeout: config.timeout
+    }));
+    const data = response.data || {};
+    const quotas = {};
+    Object.entries(data.models || {}).forEach(([modelId, modelData]) => {
+      const quotaInfo = modelData.quotaInfo || {};
+      const remainingRaw = Number(quotaInfo.remainingFraction);
+      const remaining = Number.isFinite(remainingRaw) && remainingRaw >= 0 ? remainingRaw : 0;
+      quotas[modelId] = {
+        r: remaining,
+        t: quotaInfo.resetTime || null
+      };
+    });
+    return quotas;
   }
 }
 

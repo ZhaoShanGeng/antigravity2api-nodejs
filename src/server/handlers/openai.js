@@ -48,28 +48,16 @@ export const createStreamChunk = (id, created, model, delta, finish_reason = nul
  */
 export const handleOpenAIRequest = async (req, res) => {
   const { messages, model, stream = false, tools, ...params } = req.body;
+  const { id, created } = createResponseMeta();
+  const isImageModel = model.includes('-image');
+  const maxRetries = Number(config.retryTimes || 0);
+  const safeRetries = maxRetries > 0 ? Math.floor(maxRetries) : 0;
   
   try {
     if (!messages) {
       return res.status(400).json({ error: 'messages is required' });
     }
-    
-    const token = await tokenManager.getToken();
-    if (!token) {
-      throw new Error('没有可用的token，请运行 npm run login 获取token');
-    }
-    
-    const isImageModel = model.includes('-image');
-    const requestBody = generateRequestBody(messages, model, params, tools, token);
-    
-    if (isImageModel) {
-      prepareImageRequest(requestBody);
-    }
-    //console.log(JSON.stringify(requestBody,null,2));
-    const { id, created } = createResponseMeta();
-    const maxRetries = Number(config.retryTimes || 0);
-    const safeRetries = maxRetries > 0 ? Math.floor(maxRetries) : 0;
-    
+
     if (stream) {
       setStreamHeaders(res);
       
@@ -77,15 +65,21 @@ export const handleOpenAIRequest = async (req, res) => {
       const heartbeatTimer = createHeartbeat(res);
 
       try {
-        if (isImageModel) {
-          const { content, usage } = await with429Retry(
-            () => generateAssistantResponseNoStream(requestBody, token),
-            safeRetries,
-            'chat.stream.image '
-          );
-          writeStreamData(res, createStreamChunk(id, created, model, { content }));
-          writeStreamData(res, { ...createStreamChunk(id, created, model, {}, 'stop'), usage });
-        } else {
+        await tokenManager.executeWithToken(async (token) => {
+          const requestBody = generateRequestBody(messages, model, params, tools, token);
+          
+          if (isImageModel) {
+            prepareImageRequest(requestBody);
+            const { content, usage } = await with429Retry(
+              () => generateAssistantResponseNoStream(requestBody, token),
+              safeRetries,
+              'chat.stream.image '
+            );
+            writeStreamData(res, createStreamChunk(id, created, model, { content }));
+            writeStreamData(res, { ...createStreamChunk(id, created, model, {}, 'stop'), usage });
+            return;
+          }
+          
           let hasToolCall = false;
           let usageData = null;
 
@@ -122,7 +116,7 @@ export const handleOpenAIRequest = async (req, res) => {
           );
 
           writeStreamData(res, { ...createStreamChunk(id, created, model, {}, hasToolCall ? 'tool_calls' : 'stop'), usage: usageData });
-        }
+        }, model);
 
         clearInterval(heartbeatTimer);
         endStream(res);
@@ -135,11 +129,17 @@ export const handleOpenAIRequest = async (req, res) => {
       req.setTimeout(0); // 禁用请求超时
       res.setTimeout(0); // 禁用响应超时
       
-      const { content, reasoningContent, reasoningSignature, toolCalls, usage } = await with429Retry(
-        () => generateAssistantResponseNoStream(requestBody, token),
-        safeRetries,
-        'chat.no_stream '
-      );
+      const { content, reasoningContent, reasoningSignature, toolCalls, usage } = await tokenManager.executeWithToken(async (token) => {
+        const requestBody = generateRequestBody(messages, model, params, tools, token);
+        if (isImageModel) {
+          prepareImageRequest(requestBody);
+        }
+        return with429Retry(
+          () => generateAssistantResponseNoStream(requestBody, token),
+          safeRetries,
+          'chat.no_stream '
+        );
+      }, model);
       
       // DeepSeek 格式：reasoning_content 在 content 之前
       const message = { role: 'assistant' };

@@ -136,6 +136,7 @@ function buildRequesterConfig(headers, body = null) {
 async function handleApiError(error, token) {
   const status = error.response?.status || error.status || error.statusCode || 500;
   let errorBody = error.message;
+  let errorText = '';
   
   if (error.response?.data?.readable) {
     const chunks = [];
@@ -143,10 +144,17 @@ async function handleApiError(error, token) {
       chunks.push(chunk);
     }
     errorBody = Buffer.concat(chunks).toString();
+    errorText = errorBody;
   } else if (typeof error.response?.data === 'object') {
     errorBody = JSON.stringify(error.response.data, null, 2);
+    errorText = errorBody;
   } else if (error.response?.data) {
     errorBody = error.response.data;
+    errorText = typeof errorBody === 'string' ? errorBody : String(errorBody);
+  }
+
+  if (!errorText) {
+    errorText = typeof errorBody === 'string' ? errorBody : '';
   }
   
   if (status === 403) {
@@ -157,7 +165,13 @@ async function handleApiError(error, token) {
     throw createApiError(`该账号没有使用权限，已自动禁用。错误详情: ${errorBody}`, status, errorBody);
   }
   
-  throw createApiError(`API请求失败 (${status}): ${errorBody}`, status, errorBody);
+  const apiError = createApiError(`API请求失败 (${status}): ${errorBody}`, status, errorBody);
+  const maybeQuota = status === 429 || /quota|exceed|exhaust|insufficient/i.test(errorText || '');
+  if (maybeQuota) {
+    apiError.isQuotaExhausted = true;
+  }
+  
+  throw apiError;
 }
 
 
@@ -329,12 +343,13 @@ export async function getModelsWithQuotas(token) {
 
   const quotas = {};
   Object.entries(data.models || {}).forEach(([modelId, modelData]) => {
-    if (modelData.quotaInfo) {
-      quotas[modelId] = {
-        r: modelData.quotaInfo.remainingFraction,
-        t: modelData.quotaInfo.resetTime
-      };
-    }
+    const quotaInfo = modelData.quotaInfo || {};
+    const remainingRaw = Number(quotaInfo.remainingFraction);
+    const remaining = Number.isFinite(remainingRaw) && remainingRaw >= 0 ? remainingRaw : 0;
+    quotas[modelId] = {
+      r: remaining,
+      t: quotaInfo.resetTime || null
+    };
   });
   
   return quotas;

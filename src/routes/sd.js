@@ -121,30 +121,28 @@ router.post('/img2img', async (req, res) => {
       return res.status(400).json({ error: 'prompt is required' });
     }
     
-    const token = await tokenManager.getToken();
-    if (!token) {
-      throw new Error('没有可用的token');
-    }
-    
-    // 构建包含图片的消息
-    const content = [{ type: 'text', text: prompt }];
-    if (init_images && init_images.length > 0) {
-      init_images.forEach(img => {
-        const format = img.startsWith('/9j/') ? 'jpeg' : 'png';
-        content.push({ type: 'image_url', image_url: { url: `data:image/${format};base64,${img}` } });
-      });
-    }
-    
-    const messages = [{ role: 'user', content }];
-    const requestBody = prepareImageRequest(
-      generateRequestBody(messages, 'gemini-3-pro-image', {}, null, token)
-    );
-    
-    const images = await generateImageForSD(requestBody, token);
-    
-    if (images.length === 0) {
-      throw new Error('未生成图片');
-    }
+    const { images } = await tokenManager.executeWithToken(async (token) => {
+      // 构建包含图片的消息
+      const content = [{ type: 'text', text: prompt }];
+      if (init_images && init_images.length > 0) {
+        init_images.forEach(img => {
+          const format = img.startsWith('/9j/') ? 'jpeg' : 'png';
+          content.push({ type: 'image_url', image_url: { url: `data:image/${format};base64,${img}` } });
+        });
+      }
+      
+      const messages = [{ role: 'user', content }];
+      const requestBody = prepareImageRequest(
+        generateRequestBody(messages, 'gemini-3-pro-image', {}, null, token)
+      );
+      
+      const generatedImages = await generateImageForSD(requestBody, token);
+      
+      if (generatedImages.length === 0) {
+        throw new Error('未生成图片');
+      }
+      return { images: generatedImages };
+    }, 'gemini-3-pro-image');
     
     res.json({
       images,
@@ -165,17 +163,15 @@ router.post('/txt2img', async (req, res) => {
       return res.status(400).json({ error: 'prompt is required' });
     }
     
-    const token = await tokenManager.getToken();
-    if (!token) {
-      throw new Error('没有可用的token');
-    }
-    
-    const requestBody = buildImageRequestBody(prompt, token);
-    const images = await generateImageForSD(requestBody, token);
-    
-    if (images.length === 0) {
-      throw new Error('未生成图片');
-    }
+    const { images } = await tokenManager.executeWithToken(async (token) => {
+      const requestBody = buildImageRequestBody(prompt, token);
+      const generatedImages = await generateImageForSD(requestBody, token);
+      
+      if (generatedImages.length === 0) {
+        throw new Error('未生成图片');
+      }
+      return { images: generatedImages };
+    }, 'gemini-3-pro-image');
     
     res.json({
       images,

@@ -4,7 +4,7 @@ function toggleRequestCountInput() {
     const strategy = document.getElementById('rotationStrategy').value;
     const requestCountGroup = document.getElementById('requestCountGroup');
     if (requestCountGroup) {
-        requestCountGroup.style.display = strategy === 'request_count' ? 'block' : 'none';
+        requestCountGroup.style.display = (strategy === 'request_count' || strategy === 'round_robin') ? 'block' : 'none';
     }
 }
 
@@ -24,7 +24,7 @@ async function loadRotationStatus() {
             const statusEl = document.getElementById('currentRotationInfo');
             if (statusEl) {
                 let statusText = `${strategyNames[strategy] || strategy}`;
-                if (strategy === 'request_count') {
+                if (strategy === 'request_count' || (strategy === 'round_robin' && requestCount > 1)) {
                     statusText += ` (每${requestCount}次)`;
                 }
                 statusText += ` | 当前索引: ${currentIndex}`;
@@ -78,7 +78,7 @@ async function loadConfig() {
                     form.elements['ROTATION_STRATEGY'].value = json.rotation.strategy || 'round_robin';
                 }
                 if (form.elements['ROTATION_REQUEST_COUNT']) {
-                    form.elements['ROTATION_REQUEST_COUNT'].value = json.rotation.requestCount || 10;
+                    form.elements['ROTATION_REQUEST_COUNT'].value = json.rotation.requestCount || 1;
                 }
                 toggleRequestCountInput();
             }

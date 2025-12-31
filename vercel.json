@@ -1,0 +1,15 @@
+{
+  "rewrites": [
+    { "source": "/v1/(.*)", "destination": "/api/index" },
+    { "source": "/v1beta/(.*)", "destination": "/api/index" },
+    { "source": "/admin/(.*)", "destination": "/api/index" },
+    { "source": "/sdapi/(.*)", "destination": "/api/index" },
+    { "source": "/health", "destination": "/api/index" },
+    { "source": "/v1/memory", "destination": "/api/index" }
+  ],
+  "functions": {
+    "api/index.js": {
+      "runtime": "nodejs18.x"
+    }
+  }
+}

@@ -100,7 +100,7 @@ export const DEFAULT_MAX_REQUEST_SIZE = '50mb';
  * 默认每个 Token 请求次数后切换
  * @type {number}
  */
-export const DEFAULT_REQUEST_COUNT_PER_TOKEN = 50;
+export const DEFAULT_REQUEST_COUNT_PER_TOKEN = 1;
 
 /**
  * Token 过期提前刷新时间（毫秒）- 5分钟
