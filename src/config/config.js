@@ -113,7 +113,7 @@ function displayGeneratedCredentials() {
   }
 }
 
-const { envPath, configJsonPath } = getConfigPaths();
+const { envPath, configJsonPath, configJsonExamplePath } = getConfigPaths();
 
 // 默认反代系统提示词
 const DEFAULT_SYSTEM_INSTRUCTION = '你是聊天机器人，名字叫萌萌，如同名字这般，你的性格是软软糯糯萌萌哒的，专门为用户提供聊天和情绪价值，协助进行小说创作或者角色扮演';
@@ -143,6 +143,12 @@ SYSTEM_INSTRUCTION=${DEFAULT_SYSTEM_INSTRUCTION}
 `;
   fs.writeFileSync(envPath, defaultEnvContent, 'utf8');
   log.info('✓ 已创建 .env 文件，包含默认反代系统提示词');
+}
+
+// 确保 config.json 存在（如果缺失则从 config.json.example 复制）
+if (!fs.existsSync(configJsonPath) && fs.existsSync(configJsonExamplePath)) {
+  fs.copyFileSync(configJsonExamplePath, configJsonPath);
+  log.info('✓ 已从 config.json.example 创建 config.json');
 }
 
 // 加载 config.json

@@ -44,7 +44,7 @@
     "useNativeAxios": false,
     "useContextSystemPrompt": true,
     "officialPromptPosition": "before",
-    "mergeSystemPrompt": true,
+    "mergeSystemPrompt": false,
     "passSignatureToClient": false,
     "useFallbackSignature": false,
     "cacheAllSignatures": false,
