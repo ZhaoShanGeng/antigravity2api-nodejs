@@ -2,9 +2,9 @@ name: Docker Build and Push
 
 on:
   push:
-    branches: [ 'main' ]
+    branches: [ '**' ]
   release:
-    types: [published]
+    types: [ published ]
   workflow_dispatch:
 
 env:
@@ -76,11 +76,29 @@ jobs:
         id: tags
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ steps.image.outputs.name }}"
-          SHA_SHORT="${GITHUB_SHA::7}"
           ARCH="${{ matrix.arch }}"
-          
-          # 使用 Commit SHA 作为唯一的中间构建标识，避免分支/Tag 命名冲突
+          SHA_SHORT="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+
           TAGS="${IMAGE}:sha-${SHA_SHORT}-${ARCH}"
+
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
+            TAGS="${TAGS},${IMAGE}:${VERSION}-${ARCH}"
+
+            # 只在正式版 Release 上更新 latest/main，避免 prerelease 污染稳定标签
+            if [ "${{ github.event.release.prerelease }}" != "true" ]; then
+              TAGS="${TAGS},${IMAGE}:latest-${ARCH},${IMAGE}:main-${ARCH}"
+            fi
+          else
+            BRANCH="${{ github.ref_name }}"
+            if [ "$BRANCH" != "main" ]; then
+              TAGS="${TAGS},${IMAGE}:${BRANCH}-${ARCH}"
+            fi
+
+            if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+              TAGS="${TAGS},${IMAGE}:latest-${ARCH},${IMAGE}:main-${ARCH}"
+            fi
+          fi
           
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
 
@@ -92,14 +110,15 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ steps.tags.outputs.tags }}
-          # 关键：让 buildx 能访问本地文件
-          outputs: type=image,push=true
+          provenance: false
+          sbom: false
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
   create-manifest:
     needs: build
     runs-on: ubuntu-latest
+    if: github.event_name == 'release' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     permissions:
       packages: write
     
@@ -107,6 +126,9 @@ jobs:
       - name: Set lowercase image name
         id: image
         run: echo "name=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -118,36 +140,36 @@ jobs:
       - name: Create and push multi-arch manifest
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ steps.image.outputs.name }}"
-          SHA_SHORT="${GITHUB_SHA::7}"
+          SHA_SHORT="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+
+          # 始终提供 sha-<short> 这个多架构标签，便于精确定位构建
+          docker buildx imagetools create -t ${IMAGE}:sha-${SHA_SHORT} \
+            ${IMAGE}:sha-${SHA_SHORT}-amd64 \
+            ${IMAGE}:sha-${SHA_SHORT}-arm64
           
-          # 源镜像（不同架构）
-          SOURCE_AMD64="${IMAGE}:sha-${SHA_SHORT}-amd64"
-          SOURCE_ARM64="${IMAGE}:sha-${SHA_SHORT}-arm64"
-          
-          # 1. 总是创建带 SHA 的多架构镜像 (用于回溯)
-          docker buildx imagetools create -t "${IMAGE}:sha-${SHA_SHORT}" \
-            "${SOURCE_AMD64}" \
-            "${SOURCE_ARM64}"
-            
-          # 2. 处理 Release (Tag)
-          if [[ "${{ github.event_name }}" == "release" ]]; then
-            VERSION="${{ github.ref_name }}"
-            echo "Pushing release tags: ${VERSION} and latest"
-            
-            # Release Version Tag (e.g. 20240101.1-xxxx)
-            docker buildx imagetools create -t "${IMAGE}:${VERSION}" \
-              "${SOURCE_AMD64}" \
-              "${SOURCE_ARM64}"
-              
-            # latest (Release 总是更新 latest)
-            docker buildx imagetools create -t "${IMAGE}:latest" \
-              "${SOURCE_AMD64}" \
-              "${SOURCE_ARM64}"
-              
-          # 3. 处理 Main 分支
-          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "Pushing branch tag: main"
-            docker buildx imagetools create -t "${IMAGE}:main" \
-              "${SOURCE_AMD64}" \
-              "${SOURCE_ARM64}"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
+
+            docker buildx imagetools create -t ${IMAGE}:${VERSION} \
+              ${IMAGE}:${VERSION}-amd64 \
+              ${IMAGE}:${VERSION}-arm64
+
+            # 只在正式版 Release 上更新 latest/main
+            if [ "${{ github.event.release.prerelease }}" != "true" ]; then
+              docker buildx imagetools create -t ${IMAGE}:latest \
+                ${IMAGE}:latest-amd64 \
+                ${IMAGE}:latest-arm64
+
+              docker buildx imagetools create -t ${IMAGE}:main \
+                ${IMAGE}:main-amd64 \
+                ${IMAGE}:main-arm64
+            fi
+          else
+            docker buildx imagetools create -t ${IMAGE}:latest \
+              ${IMAGE}:latest-amd64 \
+              ${IMAGE}:latest-arm64
+
+            docker buildx imagetools create -t ${IMAGE}:main \
+              ${IMAGE}:main-amd64 \
+              ${IMAGE}:main-arm64
           fi
