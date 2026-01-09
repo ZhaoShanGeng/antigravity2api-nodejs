@@ -3,7 +3,8 @@ name: Docker Build and Push
 on:
   push:
     branches: [ 'main' ]
-    tags: [ 'v*' ]
+  release:
+    types: [published]
   workflow_dispatch:
 
 env:
@@ -128,17 +129,17 @@ jobs:
             "${SOURCE_AMD64}" \
             "${SOURCE_ARM64}"
             
-          # 2. 处理 Tag (Release)
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          # 2. 处理 Release (Tag)
+          if [[ "${{ github.event_name }}" == "release" ]]; then
             VERSION="${{ github.ref_name }}"
             echo "Pushing release tags: ${VERSION} and latest"
             
-            # v1.0.0
+            # Release Version Tag (e.g. 20240101.1-xxxx)
             docker buildx imagetools create -t "${IMAGE}:${VERSION}" \
               "${SOURCE_AMD64}" \
               "${SOURCE_ARM64}"
               
-            # latest (仅当是 Release 时更新 latest)
+            # latest (Release 总是更新 latest)
             docker buildx imagetools create -t "${IMAGE}:latest" \
               "${SOURCE_AMD64}" \
               "${SOURCE_ARM64}"
