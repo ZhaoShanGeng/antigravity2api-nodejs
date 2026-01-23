@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { log } from '../utils/logger.js';
 import { getDataDir } from '../utils/paths.js';
+import { getGroupKey, MODEL_GROUPS } from '../utils/modelGroups.js';
 
 /**
  * Token 模型系列冷却管理器
@@ -19,9 +20,6 @@ import { getDataDir } from '../utils/paths.js';
  *   }
  * }
  */
-
-// 模型系列定义（与 quota_manager.js 保持一致）
-const MODEL_GROUPS = ['claude', 'gemini', 'banana', 'other'];
 
 class TokenCooldownManager {
   constructor(filePath = path.join(getDataDir(), 'token_cooldowns.json')) {
@@ -117,20 +115,6 @@ class TokenCooldownManager {
   }
 
   /**
-   * 获取模型所属的组 key
-   * @param {string} modelId - 模型 ID
-   * @returns {string} 组 key
-   */
-  getGroupKey(modelId) {
-    if (!modelId) return 'other';
-    const lower = modelId.toLowerCase();
-    if (lower.includes('claude')) return 'claude';
-    if (lower.includes('gemini-3-pro-image')) return 'banana';
-    if (lower.includes('gemini') || lower.includes('publishers/google/')) return 'gemini';
-    return 'other';
-  }
-
-  /**
    * 禁用指定 token 的指定模型系列，直到指定时间
    * @param {string} tokenId - Token ID
    * @param {string} modelId - 模型 ID（用于确定模型系列）
@@ -139,7 +123,7 @@ class TokenCooldownManager {
   setCooldown(tokenId, modelId, untilTimestamp) {
     if (!tokenId || !untilTimestamp) return;
 
-    const groupKey = this.getGroupKey(modelId);
+    const groupKey = getGroupKey(modelId);
     let groups = this.cooldowns.get(tokenId);
 
     if (!groups) {
@@ -167,7 +151,7 @@ class TokenCooldownManager {
     const groups = this.cooldowns.get(tokenId);
     if (!groups) return true;
 
-    const groupKey = this.getGroupKey(modelId);
+    const groupKey = getGroupKey(modelId);
     const cooldown = groups[groupKey];
 
     if (!cooldown || !cooldown.until) return true;
@@ -196,7 +180,7 @@ class TokenCooldownManager {
     const groups = this.cooldowns.get(tokenId);
     if (!groups) return null;
 
-    const groupKey = this.getGroupKey(modelId);
+    const groupKey = getGroupKey(modelId);
     const cooldown = groups[groupKey];
 
     if (!cooldown || !cooldown.until) return null;
@@ -220,7 +204,7 @@ class TokenCooldownManager {
     const groups = this.cooldowns.get(tokenId);
     if (!groups) return;
 
-    const groupKey = this.getGroupKey(modelId);
+    const groupKey = getGroupKey(modelId);
     if (groups[groupKey]) {
       groups[groupKey] = null;
       log.info(`[CooldownManager] 已清除 Token ${tokenId} 的 ${groupKey} 系列冷却状态`);
